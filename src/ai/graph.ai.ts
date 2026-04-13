@@ -1,0 +1,70 @@
+import { StateGraph, StateSchema, type GraphNode } from "@langchain/langgraph";
+import z from "zod";
+import { mistralModel, cohereModel, geminiModel } from "./model.ai.js";
+import {
+  createAgent,
+  HumanMessage,
+  providerStrategy,
+  toolStrategy,
+} from "langchain";
+const state = new StateSchema({
+  problem: z.string().default(""),
+  solution_1: z.string().default(""),
+  solution_2: z.string().default(""),
+  judge: z.object({
+    solution_1_score: z.number().default(0),
+    solution_2_score: z.number().default(0),
+    solution_1_reasoning: z.string().default(""),
+    solution_2_reasoning: z.string().default(""),
+  }),
+});
+
+const solutionNode: GraphNode<typeof state> = async (state) => {
+  const [mistralResponse, cohereResponse] = await Promise.all([
+    mistralModel.invoke(state.problem),
+    cohereModel.invoke(state.problem),
+  ]);
+
+  return { solution_1: mistralResponse.text, solution_2: cohereResponse.text };
+};
+
+const judgeNode: GraphNode<typeof state> = async (state) => {
+  const { problem, solution_1, solution_2 } = state;
+
+  const judge = createAgent({
+    model: geminiModel,
+    responseFormat: providerStrategy(
+      z.object({
+        solution_1_score: z.number().min(0).max(10),
+        solution_2_score: z.number().min(0).max(10),
+        solution_1_reasoning: z.string(),
+        solution_2_reasoning: z.string(),
+      }),
+    ),
+    systemPrompt:
+      "You are a judge tasked with evaluating two solutions to a problem. Please provide a score between 0 and 10 for each solution, along with your reasoning for the scores.",
+  });
+
+  const judgeResponse = await judge.invoke({
+    messages: [
+      new HumanMessage(
+        `Problem: ${problem},solution 1: ${solution_1},solution 2: ${solution_2} please evaluate and score each solution and provide reasoning for your scores.`,
+      ),
+    ],
+  });
+  const {
+    solution_1_score,
+    solution_2_score,
+    solution_1_reasoning,
+    solution_2_reasoning,
+  } = judgeResponse.structuredResponse;
+
+  return {
+    judge: {
+      solution_1_score,
+      solution_2_score,
+      solution_1_reasoning,
+      solution_2_reasoning,
+    },
+  };
+};
